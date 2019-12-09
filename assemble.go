@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// Progress represents a progress update
+type Progress struct {
+	Size int
+}
+
 type blockDesc struct {
 	order    int
 	duration time.Duration
@@ -33,11 +38,9 @@ func (h *blockHeap) Pop() interface{} {
 	return x
 }
 
-func (dl *Downloader) assemble(ch <-chan *blockDesc) {
-	defer dl.pwr.Close()
+func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 	expected := 0
 	for {
-
 		select {
 		case block := <-ch:
 			dl.trace("assemble: %v expected %v", block, expected)
@@ -50,31 +53,25 @@ func (dl *Downloader) assemble(ch <-chan *blockDesc) {
 					break
 				}
 				if err := min.err; err != nil {
-					dl.pwr.CloseWithError(err)
-					return
+					dl.bufPool.Put(min.buf)
+					return err
 				}
-				_, err := dl.pwr.Write(min.buf.Bytes())
+				n, err := dl.pwr.Write(min.buf.Bytes())
 				dl.bufPool.Put(min.buf)
 				if err != nil {
-					dl.pwr.CloseWithError(err)
-					return
+					return err
 				}
 				heap.Remove(dl.heap, 0)
-				/*
-					if dc.progressCh != nil {
-						dc.progressCh <- Progress{
-							Duration:   min.duration,
-							Block:      min.order,
-							CRC:        min.crc,
-							Compressed: len(min.block),
-							Size:       len(min.data),
-						}
-					}*/
+				if dl.updatesCh != nil {
+					dl.updatesCh <- Progress{
+						Size: n,
+					}
+				}
 				expected++
 			}
 			if block == nil && len(*dl.heap) == 0 {
 				dl.trace("assemble: done")
-				return
+				return nil
 			}
 		case <-dl.ctx.Done():
 			dl.trace("assemble: ctx done %v", dl.ctx.Err())

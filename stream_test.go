@@ -1,4 +1,4 @@
-package httpstream_test
+package httpstream
 
 import (
 	"bytes"
@@ -9,10 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/cosnicolaou/httpstream"
 )
 
 var randSource = rand.NewSource(0x1234)
@@ -43,13 +42,9 @@ func servePredictable(res http.ResponseWriter, req *http.Request) {
 	http.ServeContent(res, req, name, time.Now(), bytes.NewReader(body))
 }
 
-func runServer() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(servePredictable))
-}
-
 func TestStream(t *testing.T) {
 	ctx := context.Background()
-	srv := runServer()
+	srv := httptest.NewServer(http.HandlerFunc(servePredictable))
 	defer srv.Close()
 	for _, chunksize := range []int64{10, 100, 1024, 2048} {
 		for _, tc := range []struct {
@@ -61,14 +56,11 @@ func TestStream(t *testing.T) {
 			{"1M"},
 		} {
 			name := fmt.Sprintf("name: %s chunksize: %v", tc.name, chunksize)
-			opts := []httpstream.Option{httpstream.Chunksize(chunksize)}
+			opts := []Option{Chunksize(chunksize)}
 			if testing.Verbose() {
-				opts = append(opts, httpstream.Verbose())
+				opts = append(opts, Verbose())
 			}
-			dl, err := httpstream.New(ctx, srv.URL+"/"+tc.name, opts...)
-			if err != nil {
-				t.Fatalf("%v: %v", name, err)
-			}
+			dl := New(ctx, srv.URL+"/"+tc.name, opts...)
 			buf, err := ioutil.ReadAll(dl)
 			if err != nil {
 				t.Errorf("%v: %v", name, err)
@@ -85,10 +77,70 @@ func TestStream(t *testing.T) {
 			if got, want := buf, servingData[tc.name]; !bytes.Equal(got, want) {
 				t.Errorf("%v: got %v, want %v", name, firstN(10, got), firstN(10, want))
 			}
-			if err := dl.Finish(); err != nil {
-				t.Errorf("%v: finish: %v", name, err)
-			}
+			// make sure all go-routines finish.
+			dl.wg.Wait()
 			t.Logf("done: %v", name)
+		}
+	}
+}
+
+func hang(res http.ResponseWriter, req *http.Request) {
+	if _, ok := req.Header["Range"]; ok {
+		time.Sleep(time.Hour)
+		return
+	}
+	body := []byte("hello")
+	http.ServeContent(res, req, "ok", time.Now(), bytes.NewReader(body))
+}
+
+func causeBackoff(res http.ResponseWriter, req *http.Request) {
+	if _, ok := req.Header["Range"]; ok {
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	body := []byte("hello")
+	http.ServeContent(res, req, "ok", time.Now(), bytes.NewReader(body))
+}
+
+type wrapper struct {
+	srv *httptest.Server
+}
+
+func (wr *wrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if _, ok := req.Header["Range"]; ok {
+		wr.srv.CloseClientConnections()
+		return
+	}
+	time.Sleep(time.Second)
+	body := []byte("hello")
+	http.ServeContent(res, req, "ok", time.Now(), bytes.NewReader(body))
+}
+
+func dropClientConnections() *httptest.Server {
+	wr := &wrapper{}
+	srv := httptest.NewServer(wr)
+	wr.srv = srv
+	return srv
+}
+
+func TestCancel(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		srv  *httptest.Server
+	}{
+		{"hang", httptest.NewServer(http.HandlerFunc(hang))},
+		{"backoff", dropClientConnections()},
+	} {
+		ctx, cancel := context.WithCancel(ctx)
+		dl := New(ctx, tc.srv.URL+"/anything", Verbose())
+		go func() {
+			time.Sleep(time.Second)
+			cancel()
+		}()
+		_, err := ioutil.ReadAll(dl)
+		if err == nil || !strings.Contains(err.Error(), "context canceled") {
+			t.Errorf("cancel did not succeed: %v", err)
 		}
 	}
 }

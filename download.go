@@ -17,38 +17,46 @@ import (
 )
 
 type options struct {
-	concurrency     int
-	chunksize       int64
-	maxConnsPerHost int
-	verbose         bool
+	concurrency int
+	chunksize   int64
+	verbose     bool
+	updatesCh   chan<- Progress
 }
 
+// Option represen ts an option to NewDownloader.
 type Option func(*options)
 
-func NumWorkers(n int) Option {
+// Concurrency sets the degree of concurrency to use, that is,
+// the number of download threads.
+func Concurrency(n int) Option {
 	return func(o *options) {
 		o.concurrency = n
 	}
 }
 
+// Chunksize sets the size of each byte range chunk to be requested.
 func Chunksize(n int64) Option {
 	return func(o *options) {
 		o.chunksize = n
 	}
 }
 
-func MaxConnsPerHost(n int) Option {
+// Verbose controls verbose logging.
+func Verbose(v bool) Option {
 	return func(o *options) {
-		o.maxConnsPerHost = n
+		o.verbose = v
+	}
+
+}
+
+// SendUpdates enables sending progreess updates to the specified channel.
+func SendUpdates(ch chan<- Progress) Option {
+	return func(o *options) {
+		o.updatesCh = ch
 	}
 }
 
-func Verbose() Option {
-	return func(o *options) {
-		o.verbose = true
-	}
-}
-
+// Downloader represents a concurrent, streaming, http downloader.
 type Downloader struct {
 	ctx         context.Context
 	verbose     bool
@@ -63,12 +71,13 @@ type Downloader struct {
 	assembleCh  chan *blockDesc
 	wg          sync.WaitGroup
 	heap        *blockHeap
+	updatesCh   chan<- Progress
 }
 
 var (
 	defaultConcurrency     = runtime.GOMAXPROCS(-1)
-	defaultChunksize       = int64(64 * 1024 * 1024)
-	defaultMaxConnsPerHost = 20
+	defaultChunksize       = int64(1024 * 1024)
+	defaultMaxConnsPerHost = defaultConcurrency
 )
 
 type byteRange struct {
@@ -123,9 +132,11 @@ func (dl *Downloader) get(url string, buf *bytes.Buffer, br *byteRange) error {
 				io.Copy(buf, resp.Body)
 				resp.Body.Close()
 				return nil
+			case http.StatusServiceUnavailable:
+			default:
+				dl.trace("get: %v: %v: %v: bad status: %v", req.URL, req.Header["Range"], resp.ContentLength, resp.Status)
+				return fmt.Errorf("bad status code: %v", resp.Status)
 			}
-			dl.trace("get: %v: %v: %v: bad status: %v", req.URL, req.Header["Range"], resp.ContentLength, resp.Status)
-			return fmt.Errorf("bad status code: %v", resp.Status)
 		}
 		state := "retry with backoff"
 		if backoffTime == backoff.Stop {
@@ -133,7 +144,6 @@ func (dl *Downloader) get(url string, buf *bytes.Buffer, br *byteRange) error {
 			state = "at max retry backoff interval"
 		}
 		dl.trace("get: %v: %v: %v: %v", req.URL, req.Header["Range"], state, err)
-
 		select {
 		case <-time.After(backoffTime):
 		case <-dl.ctx.Done():
@@ -142,22 +152,17 @@ func (dl *Downloader) get(url string, buf *bytes.Buffer, br *byteRange) error {
 	}
 }
 
-func (dl *Downloader) worker(in <-chan *byteRange, out chan<- *blockDesc) error {
+func (dl *Downloader) worker(in <-chan *byteRange, out chan<- *blockDesc) {
 	for {
 		select {
 		case r := <-in:
 			if r == nil {
-				return nil
+				return
 			}
 			start := time.Now()
 			buf := dl.bufPool.Get().(*bytes.Buffer)
 			buf.Reset()
 			err := dl.get(dl.url, buf, r)
-			if err != nil {
-				dl.bufPool.Put(buf)
-				buf = nil
-				return err
-			}
 			bl := &blockDesc{
 				order:    r.order,
 				buf:      buf,
@@ -167,16 +172,17 @@ func (dl *Downloader) worker(in <-chan *byteRange, out chan<- *blockDesc) error 
 			dl.trace("worker: %v: %v\n", bl.order, bl.duration)
 			out <- bl
 		case <-dl.ctx.Done():
-			return dl.ctx.Err()
+			dl.trace("worker: ctx done %v", dl.ctx.Err())
+			return
 		}
 	}
 }
 
-func New(ctx context.Context, url string, opts ...Option) (*Downloader, error) {
+// New returns a new instance of Downloader.
+func New(ctx context.Context, url string, opts ...Option) *Downloader {
 	o := options{
-		maxConnsPerHost: defaultMaxConnsPerHost,
-		concurrency:     defaultConcurrency,
-		chunksize:       defaultChunksize,
+		concurrency: defaultConcurrency,
+		chunksize:   defaultChunksize,
 	}
 
 	for _, fn := range opts {
@@ -193,23 +199,29 @@ func New(ctx context.Context, url string, opts ...Option) (*Downloader, error) {
 			DualStack: true,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          o.concurrency * 2,
-		MaxIdleConnsPerHost:   o.concurrency * 2,
+		MaxIdleConns:          o.concurrency,
+		MaxIdleConnsPerHost:   o.concurrency,
 		IdleConnTimeout:       180 * time.Second,
 		TLSHandshakeTimeout:   20 * time.Second,
 		ExpectContinueTimeout: 10 * time.Second,
-		MaxConnsPerHost:       o.maxConnsPerHost,
+		MaxConnsPerHost:       o.concurrency,
 		ReadBufferSize:        16 * 1024,
 	}
 
 	client := &http.Client{Transport: transport}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("%v: %v", url, err)
+		dl := &Downloader{}
+		dl.prd, dl.pwr = io.Pipe()
+		dl.pwr.CloseWithError(fmt.Errorf("%v: %v", url, err))
+		return dl
 	}
 
 	if ranges, ok := resp.Header["Accept-Ranges"]; !ok || (len(ranges) != 1 && ranges[0] != "bytes") {
-		return nil, fmt.Errorf("%v does not supprt byte-range gets", url)
+		dl := &Downloader{}
+		dl.prd, dl.pwr = io.Pipe()
+		dl.pwr.CloseWithError(fmt.Errorf("%v does not supprt byte-range gets", url))
+		return dl
 	}
 
 	nparts := int(resp.ContentLength/o.chunksize) + 1
@@ -233,6 +245,7 @@ func New(ctx context.Context, url string, opts ...Option) (*Downloader, error) {
 		workerErrCh: make(chan error, nworkers),
 		heap:        &blockHeap{},
 		verbose:     o.verbose,
+		updatesCh:   o.updatesCh,
 	}
 	dl.prd, dl.pwr = io.Pipe()
 	heap.Init(dl.heap)
@@ -253,8 +266,7 @@ func New(ctx context.Context, url string, opts ...Option) (*Downloader, error) {
 	for i := 0; i < nworkers; i++ {
 		go func(w int) {
 			dl.trace("worker: running %v/%v", w, nworkers)
-			err := dl.worker(dl.rangeCh, dl.assembleCh)
-			dl.workerErrCh <- err
+			dl.worker(dl.rangeCh, dl.assembleCh)
 			workerWg.Done()
 			dl.trace("worker: done %v/%v: %v", w, nworkers, err)
 		}(i)
@@ -262,36 +274,33 @@ func New(ctx context.Context, url string, opts ...Option) (*Downloader, error) {
 
 	go func() {
 		workerWg.Wait()
-		dl.trace("workers: finished")
 		close(dl.assembleCh)
 		dl.wg.Done()
+		dl.trace("workers: finished")
 	}()
 
 	go func() {
-		dl.assemble(dl.assembleCh)
+		err := dl.assemble(dl.assembleCh)
+		dl.pwr.CloseWithError(err)
 		assembleWg.Done()
 		dl.wg.Done()
 		dl.trace("assembler: finished")
 	}()
-	return dl, nil
+	return dl
 }
 
+// Read implements io.Reader.
 func (dl *Downloader) Read(buf []byte) (int, error) {
 	return dl.prd.Read(buf)
 }
 
+// Reader returns an io.Reader.
 func (dl *Downloader) Reader() io.Reader {
 	return dl.prd
 }
 
-func (dl *Downloader) Finish() (returnErr error) {
-	dl.wg.Wait()
-	dl.trace("downloader: finished")
-	close(dl.workerErrCh)
-	for err := range dl.workerErrCh {
-		if err != nil {
-			returnErr = err
-		}
-	}
-	return
+// ContentLength returns the content length header for the file being
+// downloaded.
+func (dl *Downloader) ContentLength() int64 {
+	return dl.size
 }
