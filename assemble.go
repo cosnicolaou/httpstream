@@ -3,6 +3,9 @@ package httpstream
 import (
 	"bytes"
 	"container/heap"
+	"encoding/hex"
+	"fmt"
+	"hash"
 	"time"
 )
 
@@ -38,6 +41,27 @@ func (h *blockHeap) Pop() interface{} {
 	return x
 }
 
+func (dl *Downloader) validateChecksums() error {
+	for _, chk := range []struct {
+		name, value string
+		h           hash.Hash
+	}{
+		{"sha1", dl.sha1Sum, dl.sha1},
+		{"md5", dl.md5Sum, dl.md5},
+	} {
+		if chk.h == nil {
+			continue
+		}
+		sum := chk.h.Sum(nil)
+		got, want := hex.EncodeToString(sum[:]), chk.value
+		dl.trace("checking: %v: %v =? %v", chk.name, got, want)
+		if got != want {
+			return fmt.Errorf("checksum mismatch %v:%v != %v:%v", chk.name, got, chk.name, want)
+		}
+	}
+	return nil
+}
+
 func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 	expected := 0
 	for {
@@ -56,7 +80,7 @@ func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 					dl.bufPool.Put(min.buf)
 					return err
 				}
-				n, err := dl.pwr.Write(min.buf.Bytes())
+				n, err := dl.wr.Write(min.buf.Bytes())
 				dl.bufPool.Put(min.buf)
 				if err != nil {
 					return err
@@ -71,6 +95,9 @@ func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 			}
 			if block == nil && len(*dl.heap) == 0 {
 				dl.trace("assemble: done")
+				if err := dl.validateChecksums(); err != nil {
+					return err
+				}
 				return nil
 			}
 		case <-dl.ctx.Done():

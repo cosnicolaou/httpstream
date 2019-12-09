@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"flag"
 	"fmt"
-	"hash"
 	"io"
 	"log"
 	"os"
@@ -26,7 +23,8 @@ var commandline struct {
 	Concurrency int    `cmd:"concurrency,,'concurrency for the download'"`
 	Output      string `cmd:"output,,output file or s3 prefix"`
 	ProgressBar bool   `cmd:"progress,true,display a progress bar"`
-	Sha1        string `cmd:"sha1,,specify a sha1 to compare the download file against"`
+	Sha1        string `cmd:"sha1,,specify a sha1 to compare the downloaded file against"`
+	MD5         string `cmd:"MD5,,specify a md5 to compare the downloaded file against"`
 	Verbose     bool   `cmd:"verbose,false,verbose debug/trace information"`
 	RangeSize   int64  `cmd:"range-size,1048576,size of each byte-range get"`
 }
@@ -85,6 +83,12 @@ func main() {
 		httpstream.Verbose(commandline.Verbose),
 		httpstream.Chunksize(commandline.RangeSize),
 	}
+	if s := commandline.MD5; len(s) > 0 {
+		opts = append(opts, httpstream.VerifyMD5(s))
+	}
+	if s := commandline.Sha1; len(s) > 0 {
+		opts = append(opts, httpstream.VerifySHA1(s))
+	}
 	var (
 		out           io.Writer
 		progressBarCh chan httpstream.Progress
@@ -119,25 +123,8 @@ func main() {
 	} else {
 		out = os.Stdout
 	}
-
-	var wr io.Writer
-	var digester hash.Hash
-	var expected string
-	if expected = commandline.Sha1; len(expected) > 0 {
-		digester = sha1.New()
-		wr = io.MultiWriter(out, digester)
-	} else {
-		wr = out
-	}
-	if _, err := io.Copy(wr, dl); err != nil {
+	if _, err := io.Copy(out, dl); err != nil {
 		log.Fatalf("copy failed: %v", err)
-	}
-	if digester != nil {
-		digest := digester.Sum(nil)
-		sum := hex.EncodeToString(digest[:])
-		if sum != expected {
-			log.Fatalf("checksum mismatch: %v != %v", sum, expected)
-		}
 	}
 	close(progressBarCh)
 	progressBarWg.Wait()

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"container/heap"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net"
@@ -21,6 +24,8 @@ type options struct {
 	chunksize   int64
 	verbose     bool
 	updatesCh   chan<- Progress
+	sha1        string
+	md5         string
 }
 
 // Option represen ts an option to NewDownloader.
@@ -56,22 +61,37 @@ func SendUpdates(ch chan<- Progress) Option {
 	}
 }
 
+func VerifySHA1(sum string) Option {
+	return func(o *options) {
+		o.sha1 = sum
+	}
+}
+
+func VerifyMD5(sum string) Option {
+	return func(o *options) {
+		o.md5 = sum
+	}
+}
+
 // Downloader represents a concurrent, streaming, http downloader.
 type Downloader struct {
-	ctx         context.Context
-	verbose     bool
-	url         string
-	size        int64
-	transport   http.RoundTripper
-	bufPool     sync.Pool
-	prd         *io.PipeReader
-	pwr         *io.PipeWriter
-	rangeCh     chan *byteRange
-	workerErrCh chan error
-	assembleCh  chan *blockDesc
-	wg          sync.WaitGroup
-	heap        *blockHeap
-	updatesCh   chan<- Progress
+	ctx             context.Context
+	verbose         bool
+	url             string
+	size            int64
+	transport       http.RoundTripper
+	bufPool         sync.Pool
+	prd             *io.PipeReader
+	pwr             *io.PipeWriter
+	wr              io.Writer
+	rangeCh         chan *byteRange
+	workerErrCh     chan error
+	assembleCh      chan *blockDesc
+	wg              sync.WaitGroup
+	heap            *blockHeap
+	updatesCh       chan<- Progress
+	sha1, md5       hash.Hash
+	sha1Sum, md5Sum string
 }
 
 var (
@@ -247,7 +267,27 @@ func New(ctx context.Context, url string, opts ...Option) *Downloader {
 		verbose:     o.verbose,
 		updatesCh:   o.updatesCh,
 	}
+
 	dl.prd, dl.pwr = io.Pipe()
+	dl.wr = dl.pwr
+
+	writers := []io.Writer{dl.pwr}
+	if len(o.sha1) > 0 {
+		dl.sha1Sum = o.sha1
+		dl.sha1 = sha1.New()
+		writers = append(writers, dl.sha1)
+	}
+
+	if len(o.md5) > 0 {
+		dl.md5Sum = o.md5
+		dl.md5 = md5.New()
+		writers = append(writers, dl.md5)
+	}
+
+	if len(writers) > 1 {
+		dl.wr = io.MultiWriter(writers...)
+	}
+
 	heap.Init(dl.heap)
 	var generatorWg, workerWg, assembleWg sync.WaitGroup
 	generatorWg.Add(1)

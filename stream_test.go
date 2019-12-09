@@ -32,6 +32,12 @@ var servingData = map[string][]byte{
 	"1M":   genPredictableRandomData(1024 * 1024),
 }
 
+func init() {
+	for k, v := range servingData {
+		ioutil.WriteFile(k, v, 0600)
+	}
+}
+
 func servePredictable(res http.ResponseWriter, req *http.Request) {
 	name := path.Base(req.URL.Path)
 	body, ok := servingData[name]
@@ -48,19 +54,34 @@ func TestStream(t *testing.T) {
 	defer srv.Close()
 	for _, chunksize := range []int64{10, 100, 1024, 2048} {
 		for _, tc := range []struct {
-			name string
+			name    string
+			sha1Sum string
+			md5Sum  string
 		}{
-			{"0B"},
-			{"100B"},
-			{"1K"},
-			{"1M"},
+			{
+				"0B",
+				"da39a3ee5e6b4b0d3255bfef95601890afd80709", "d41d8cd98f00b204e9800998ecf8427e",
+			},
+			{
+				"100B",
+				"6013a010a4576238ccd19dd628ef06b7a4000c98", "02c731532815604ce3dac8f04df9b0b6",
+			},
+			{
+				"1K",
+				"15074d9845839a82c97e2e7097e7d40ce5395f4d", "be50caf3e170e7a0f218d2f01e77b565",
+			},
+			{
+				"1M",
+				"99d92f7ecb8e9454e5d14196476d3d2db4754e4c", "612efa708a81ab8abd4c0c7cc31956d5",
+			},
 		} {
 			name := fmt.Sprintf("name: %s chunksize: %v", tc.name, chunksize)
-			opts := []Option{Chunksize(chunksize)}
-			if testing.Verbose() {
-				opts = append(opts, Verbose())
+			opts := []Option{
+				Chunksize(chunksize),
+				Verbose(testing.Verbose()),
 			}
-			dl := New(ctx, srv.URL+"/"+tc.name, opts...)
+			url := srv.URL + "/" + tc.name
+			dl := New(ctx, url, opts...)
 			buf, err := ioutil.ReadAll(dl)
 			if err != nil {
 				t.Errorf("%v: %v", name, err)
@@ -80,6 +101,34 @@ func TestStream(t *testing.T) {
 			// make sure all go-routines finish.
 			dl.wg.Wait()
 			t.Logf("done: %v", name)
+
+			for _, chk := range []struct {
+				opts []Option
+				ok   bool
+			}{
+				{[]Option{VerifySHA1(tc.sha1Sum)}, true},
+				{[]Option{VerifyMD5(tc.md5Sum)}, true},
+				{[]Option{VerifySHA1(tc.sha1Sum), VerifyMD5(tc.md5Sum)}, true},
+				{[]Option{VerifySHA1("badsum")}, false},
+				{[]Option{VerifyMD5("badsum")}, false},
+				{[]Option{VerifySHA1("badsum"), VerifyMD5("badsum")}, false},
+			} {
+				nopts := append(opts, chk.opts...)
+				dl := New(ctx, url, nopts...)
+				_, err := ioutil.ReadAll(dl)
+				if chk.ok {
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+					}
+					continue
+				}
+				if err == nil {
+					t.Errorf("expected an error: %v", err)
+				}
+				if got, want := err.Error(), "checksum mismatch"; !strings.Contains(got, want) {
+					t.Errorf("error %v does not contain %v", got, want)
+				}
+			}
 		}
 	}
 }
@@ -133,7 +182,7 @@ func TestCancel(t *testing.T) {
 		{"backoff", dropClientConnections()},
 	} {
 		ctx, cancel := context.WithCancel(ctx)
-		dl := New(ctx, tc.srv.URL+"/anything", Verbose())
+		dl := New(ctx, tc.srv.URL+"/anything", Verbose(testing.Verbose()))
 		go func() {
 			time.Sleep(time.Second)
 			cancel()
