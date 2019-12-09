@@ -24,7 +24,7 @@ var commandline struct {
 	Output      string `cmd:"output,,output file or s3 prefix"`
 	ProgressBar bool   `cmd:"progress,true,display a progress bar"`
 	Sha1        string `cmd:"sha1,,specify a sha1 to compare the downloaded file against"`
-	MD5         string `cmd:"MD5,,specify a md5 to compare the downloaded file against"`
+	MD5         string `cmd:"md5,,specify a md5 to compare the downloaded file against"`
 	Verbose     bool   `cmd:"verbose,false,verbose debug/trace information"`
 	RangeSize   int64  `cmd:"range-size,1048576,size of each byte-range get"`
 }
@@ -66,12 +66,18 @@ func OnSignal(fn func(), signals ...os.Signal) {
 }
 
 func main() {
+	if err := download(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func download() (returnErr error) {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	OnSignal(cancel, os.Interrupt)
 	flag.Parse()
 	if len(commandline.URL) == 0 {
-		log.Fatal("must provide --url")
+		return fmt.Errorf("must provide --url")
 	}
 	if len(commandline.Output) == 0 {
 		// disable the progress bar.
@@ -105,11 +111,11 @@ func main() {
 	if name := commandline.Output; len(name) > 0 {
 		file, err := file.Create(ctx, name)
 		if err != nil {
-			log.Fatalf("failed to create %v: %v", name, err)
+			return fmt.Errorf("failed to create %v: %v", name, err)
 		}
 		defer func() {
 			if err := file.Close(ctx); err != nil {
-				log.Fatalf("failed to close %v: %v", name, err)
+				returnErr = fmt.Errorf("failed to close %v: %v", name, err)
 			}
 		}()
 		out = file.Writer(ctx)
@@ -124,8 +130,9 @@ func main() {
 		out = os.Stdout
 	}
 	if _, err := io.Copy(out, dl); err != nil {
-		log.Fatalf("copy failed: %v", err)
+		return fmt.Errorf("copy failed: %v", err)
 	}
 	close(progressBarCh)
 	progressBarWg.Wait()
+	return nil
 }
