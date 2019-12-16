@@ -11,8 +11,10 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/cosnicolaou/httpstream"
 	"github.com/grailbio/base/file"
+	"github.com/grailbio/base/file/s3file"
 	"github.com/grailbio/base/must"
 	"github.com/schollz/progressbar/v2"
 	"v.io/x/lib/cmd/flagvar"
@@ -34,6 +36,10 @@ func init() {
 		map[string]interface{}{
 			"concurrency": runtime.GOMAXPROCS(-1),
 		}, nil))
+	file.RegisterImplementation("s3", func() file.Implementation {
+		return s3file.NewImplementation(
+			s3file.NewDefaultProvider(session.Options{}), s3file.Options{})
+	})
 }
 
 func progressBar(ctx context.Context, ch chan httpstream.Progress, size int64) {
