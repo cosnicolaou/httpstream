@@ -3,6 +3,7 @@ module github.com/cosnicolaou/httpstream
 go 1.13
 
 require (
+	github.com/aws/aws-sdk-go v1.25.10
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/grailbio/base v0.0.6
 	github.com/pkg4go/httprange v0.0.0-20160404143851-bf50c5def1ce
