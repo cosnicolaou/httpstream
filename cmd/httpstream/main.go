@@ -19,7 +19,7 @@ import (
 	"github.com/grailbio/base/file"
 	"github.com/grailbio/base/file/s3file"
 	"github.com/grailbio/base/must"
-	"github.com/schollz/progressbar/v2"
+	"github.com/schollz/progressbar/v3"
 	"v.io/x/lib/cmd/flagvar"
 )
 
@@ -47,7 +47,7 @@ func init() {
 
 func progressBar(ctx context.Context, ch chan httpstream.Progress, size int64) {
 	bar := progressbar.NewOptions64(size,
-		progressbar.OptionSetBytes64(size),
+		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetPredictTime(true))
 	bar.RenderBlank()
 	for {
