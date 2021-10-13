@@ -39,7 +39,9 @@ var servingData = map[string][]byte{
 
 func init() {
 	for k, v := range servingData {
-		os.WriteFile(k, v, 0600)
+		if err := os.WriteFile(k, v, 0600); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -144,15 +146,6 @@ func TestStream(t *testing.T) {
 func hang(res http.ResponseWriter, req *http.Request) {
 	if _, ok := req.Header["Range"]; ok {
 		time.Sleep(time.Hour)
-		return
-	}
-	body := []byte("hello")
-	http.ServeContent(res, req, "ok", time.Now(), bytes.NewReader(body))
-}
-
-func causeBackoff(res http.ResponseWriter, req *http.Request) {
-	if _, ok := req.Header["Range"]; ok {
-		res.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	body := []byte("hello")

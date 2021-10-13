@@ -98,9 +98,8 @@ type Downloader struct {
 }
 
 var (
-	defaultConcurrency     = runtime.GOMAXPROCS(-1)
-	defaultChunksize       = int64(1024 * 1024)
-	defaultMaxConnsPerHost = defaultConcurrency
+	defaultConcurrency = runtime.GOMAXPROCS(-1)
+	defaultChunksize   = int64(1024 * 1024)
 )
 
 type byteRange struct {
@@ -152,9 +151,9 @@ func (dl *Downloader) get(url string, buf *bytes.Buffer, br *byteRange) error {
 			switch resp.StatusCode {
 			case http.StatusOK, http.StatusPartialContent:
 				dl.trace("%v: %v: %v", req.URL, req.Header["Range"], resp.ContentLength)
-				io.Copy(buf, resp.Body)
+				_, err := io.Copy(buf, resp.Body)
 				resp.Body.Close()
-				return nil
+				return err
 			case http.StatusServiceUnavailable:
 			default:
 				dl.trace("get: %v: %v: %v: bad status: %v", req.URL, req.Header["Range"], resp.ContentLength, resp.Status)
@@ -236,14 +235,14 @@ func New(ctx context.Context, url string, opts ...Option) *Downloader {
 	if err != nil {
 		dl := &Downloader{}
 		dl.prd, dl.pwr = io.Pipe()
-		dl.pwr.CloseWithError(fmt.Errorf("%v: %v", url, err))
+		_ = dl.pwr.CloseWithError(fmt.Errorf("%v: %v", url, err))
 		return dl
 	}
 
 	if ranges, ok := resp.Header["Accept-Ranges"]; !ok || (len(ranges) != 1 && ranges[0] != "bytes") {
 		dl := &Downloader{}
 		dl.prd, dl.pwr = io.Pipe()
-		dl.pwr.CloseWithError(fmt.Errorf("%v does not supprt byte-range gets", url))
+		_ = dl.pwr.CloseWithError(fmt.Errorf("%v does not supprt byte-range gets", url))
 		return dl
 	}
 
@@ -324,7 +323,7 @@ func New(ctx context.Context, url string, opts ...Option) *Downloader {
 
 	go func() {
 		err := dl.assemble(dl.assembleCh)
-		dl.pwr.CloseWithError(err)
+		_ = dl.pwr.CloseWithError(err)
 		assembleWg.Done()
 		dl.wg.Done()
 		dl.trace("assembler: finished")
