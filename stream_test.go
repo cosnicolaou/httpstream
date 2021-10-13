@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
 	"strings"
 	"testing"
@@ -37,7 +39,7 @@ var servingData = map[string][]byte{
 
 func init() {
 	for k, v := range servingData {
-		ioutil.WriteFile(k, v, 0600)
+		os.WriteFile(k, v, 0600)
 	}
 }
 
@@ -54,7 +56,7 @@ func servePredictable(res http.ResponseWriter, req *http.Request) {
 func TestStream(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(http.HandlerFunc(servePredictable))
-	defer srv.Close()
+	defer srv.CloseClientConnections()
 	for _, chunksize := range []int64{10, 100, 1024, 2048} {
 		for _, tc := range []struct {
 			name    string
@@ -102,8 +104,8 @@ func TestStream(t *testing.T) {
 				t.Errorf("%v: got %v, want %v", name, firstN(10, got), firstN(10, want))
 			}
 			// make sure all go-routines finish.
-			dl.wg.Wait()
-			t.Logf("done: %v", name)
+			dl.Finish()
+			t.Logf("download done: %v", name)
 
 			for _, chk := range []struct {
 				opts []Option
@@ -118,7 +120,7 @@ func TestStream(t *testing.T) {
 			} {
 				nopts := append(opts, chk.opts...)
 				dl := New(ctx, url, nopts...)
-				_, err := ioutil.ReadAll(dl)
+				_, err := io.ReadAll(dl)
 				if chk.ok {
 					if err != nil {
 						t.Errorf("unexpected error: %v", err)
@@ -131,9 +133,12 @@ func TestStream(t *testing.T) {
 				if got, want := err.Error(), "checksum mismatch"; !strings.Contains(got, want) {
 					t.Errorf("error %v does not contain %v", got, want)
 				}
+				dl.Finish()
 			}
+			t.Logf("download checks: %v", name)
 		}
 	}
+	fmt.Printf("all done\n")
 }
 
 func hang(res http.ResponseWriter, req *http.Request) {
@@ -182,7 +187,7 @@ func TestCancel(t *testing.T) {
 		srv  *httptest.Server
 	}{
 		{"hang", httptest.NewServer(http.HandlerFunc(hang))},
-		{"backoff", dropClientConnections()},
+		{"drop", dropClientConnections()},
 	} {
 		ctx, cancel := context.WithCancel(ctx)
 		dl := New(ctx, tc.srv.URL+"/anything", Verbose(testing.Verbose()))

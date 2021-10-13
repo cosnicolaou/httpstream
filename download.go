@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 )
 
 type options struct {
@@ -346,4 +346,9 @@ func (dl *Downloader) Reader() io.Reader {
 // downloaded.
 func (dl *Downloader) ContentLength() int64 {
 	return dl.size
+}
+
+func (dl *Downloader) Finish() {
+	dl.wg.Wait()
+
 }

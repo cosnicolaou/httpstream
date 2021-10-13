@@ -79,6 +79,7 @@ func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 				if min.order != expected {
 					break
 				}
+				dl.trace("assemble: %v got %v", block, expected)
 				if err := min.err; err != nil {
 					dl.bufPool.Put(min.buf)
 					return err
@@ -97,10 +98,11 @@ func (dl *Downloader) assemble(ch <-chan *blockDesc) error {
 				expected++
 			}
 			if block == nil && len(*dl.heap) == 0 {
-				dl.trace("assemble: done")
 				if err := dl.validateChecksums(); err != nil {
+					dl.trace("assemble: done: error %v", err)
 					return err
 				}
+				dl.trace("assemble: done")
 				return nil
 			}
 		case <-dl.ctx.Done():
