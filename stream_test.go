@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,16 +38,17 @@ var servingData = map[string][]byte{
 	"1M":   genPredictableRandomData(1024 * 1024),
 }
 
-func init() {
+func writeTestData(tmpdir string) error {
 	for k, v := range servingData {
-		if err := os.WriteFile(k, v, 0600); err != nil {
-			panic(err)
+		if err := os.WriteFile(filepath.Join(tmpdir, k), v, 0600); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-func servePredictable(res http.ResponseWriter, req *http.Request) {
-	name := path.Base(req.URL.Path)
+func servePredictable(tmpdir string, res http.ResponseWriter, req *http.Request) {
+	name := path.Base(filepath.Join(tmpdir, req.URL.Path))
 	body, ok := servingData[name]
 	if !ok {
 		res.WriteHeader(http.StatusNotFound)
@@ -56,8 +58,15 @@ func servePredictable(res http.ResponseWriter, req *http.Request) {
 }
 
 func TestStream(t *testing.T) {
+	tmpdir := t.TempDir()
+	if err := writeTestData(tmpdir); err != nil {
+		t.Fatal(err)
+	}
+	server := func(res http.ResponseWriter, req *http.Request) {
+		servePredictable(tmpdir, res, req)
+	}
 	ctx := context.Background()
-	srv := httptest.NewServer(http.HandlerFunc(servePredictable))
+	srv := httptest.NewServer(http.HandlerFunc(server))
 	defer srv.CloseClientConnections()
 	for _, chunksize := range []int64{10, 100, 1024, 2048} {
 		for _, tc := range []struct {
